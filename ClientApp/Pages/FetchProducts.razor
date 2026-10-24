@@ -1,0 +1,135 @@
+@page "/"
+@page "/fetchproducts"
+@inject HttpClient Http
+@implements IDisposable
+
+<PageTitle>InventoryHub</PageTitle>
+
+<main class="container">
+    <h1>InventoryHub</h1>
+    <p>Full-stack product inventory dashboard</p>
+
+    <button @onclick="LoadAsync" disabled="@loading">Refresh products</button>
+
+    @if (loading)
+    {
+        <p role="status">Loading products...</p>
+    }
+    else if (!string.IsNullOrWhiteSpace(error))
+    {
+        <p role="alert" class="error">@error</p>
+    }
+    else if (products is not null)
+    {
+        <table>
+            <thead>
+                <tr>
+                    <th>Product</th>
+                    <th>Category</th>
+                    <th>Price</th>
+                    <th>Stock</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var product in products)
+                {
+                    <tr>
+                        <td>@product.Name</td>
+                        <td>@product.Category.Name</td>
+                        <td>@product.Price.ToString("C", System.Globalization.CultureInfo.GetCultureInfo("en-US"))</td>
+                        <td>@product.Stock</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+        <p>@products.Length product(s) loaded.</p>
+    }
+</main>
+
+@code {
+    private Product[]? products;
+    private string? error;
+    private bool loading;
+    private CancellationTokenSource? requestCts;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        if (loading)
+        {
+            return;
+        }
+
+        loading = true;
+        error = null;
+
+        requestCts?.Cancel();
+        requestCts = new CancellationTokenSource();
+
+        try
+        {
+            var response = await Http.GetAsync(
+                "api/productlist",
+                HttpCompletionOption.ResponseHeadersRead,
+                requestCts.Token);
+
+            response.EnsureSuccessStatusCode();
+
+            var payload = await response.Content.ReadFromJsonAsync<Product[]>(
+                new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web),
+                requestCts.Token);
+
+            if (payload is null)
+            {
+                throw new System.Text.Json.JsonException("The API returned no product data.");
+            }
+
+            if (payload.Length == 0 || payload.Any(product =>
+                    product.Category is null ||
+                    string.IsNullOrWhiteSpace(product.Name) ||
+                    product.Price < 0 ||
+                    product.Stock < 0))
+            {
+                throw new System.Text.Json.JsonException("The API returned invalid product data.");
+            }
+
+            products = payload;
+        }
+        catch (OperationCanceledException) when (requestCts is not null && requestCts.IsCancellationRequested)
+        {
+            // Ignore intentional cancellation when a newer request supersedes an older one.
+        }
+        catch (TaskCanceledException)
+        {
+            error = "The request timed out. Please retry.";
+        }
+        catch (HttpRequestException)
+        {
+            error = "Unable to reach the inventory API. Is the server running?";
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            error = "The API returned invalid product data.";
+        }
+        catch (Exception)
+        {
+            error = "Something unexpected happened while loading products. Please try again.";
+        }
+        finally
+        {
+            loading = false;
+            requestCts?.Dispose();
+            requestCts = null;
+        }
+    }
+
+    public void Dispose()
+    {
+        requestCts?.Cancel();
+        requestCts?.Dispose();
+    }
+
+    public record Category(int Id, string Name);
+    public record Product(int Id, string Name, decimal Price, int Stock, Category Category);
+}
